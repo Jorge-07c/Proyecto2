@@ -141,10 +141,10 @@ def hacer_barcode(texto):
     codigos.append(ck % 103); codigos.append(106)
     patron = "".join(_PT[c] for c in codigos if c < len(_PT))
 
-    escala = 2
+    escala = 3                 # escala mayor = mas facil de escanear con camara
     zona   = 10 * escala
     ancho  = len(patron) * escala + 2 * zona
-    alto   = 90
+    alto   = 100
     img    = Image.new("RGB", (ancho, alto + 20), "white")
     draw   = ImageDraw.Draw(img)
     x = zona
@@ -376,16 +376,12 @@ def pg_inventario():
 # ─────────────────────────────────────────────────────────
 #  PAGINA: BUSCAR / ESCANEAR
 # ─────────────────────────────────────────────────────────
-def _leer_barcode_python(img_pil):
+def _leer_barcode_python(img_pil_original):
     """
     Lee un codigo de barra Code 128 de una imagen PIL.
-    Funciona 100% en Python puro, sin librerias externas.
-    Estrategia: busca filas de pixeles con patron de barras negro/blanco
-    y decodifica usando el mapa Code 128.
+    Sin dependencias externas. Robusto para fotos de telefono.
+    Prueba multiples filas, escalas y rotaciones.
     """
-    import struct
-
-    # Mapa inverso: patron -> valor Code 128
     _PT = ["11011001100","11001101100","11001100110","10010011000","10010001100",
            "10001001100","10011001000","10011000100","10001100100","11001001000",
            "11001000100","11000100100","10110011100","10011011100","10011001110",
@@ -409,97 +405,111 @@ def _leer_barcode_python(img_pil):
            "10111101110","11101011110","11110101110","11010000100","11010010000",
            "11010011100","1100011101011"]
     _CS = ' !"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~'
-    PAT_MAP = {p: i for i, p in enumerate(_PT)}
-    START_B = 104
+    PAT_MAP  = {p: i for i, p in enumerate(_PT)}
+    START_B  = 104
+    STOP_PAT = _PT[106]
 
-    img = img_pil.convert("L")          # escala de grises
-    w, h = img.size
-    pixels = list(img.getdata())
-
-    def get_row(y):
-        return pixels[y * w: y * w + w]
-
-    # Busca la fila con mayor contraste (donde estan las barras)
-    best_row = None
-    best_contrast = 0
-    for y in range(h // 4, 3 * h // 4, max(1, h // 40)):
-        row = get_row(y)
+    def decodificar_fila(row):
+        if not row: return None
         mn, mx = min(row), max(row)
-        if mx - mn > best_contrast:
-            best_contrast = mx - mn
-            best_row = row
+        if mx - mn < 40: return None          # poco contraste
+        umbral   = (mn + mx) // 2
+        bits_raw = [1 if p <= umbral else 0 for p in row]
 
-    if best_row is None or best_contrast < 60:
+        # Agrupar runs
+        runs = []
+        cur = bits_raw[0]; cnt = 1
+        for b in bits_raw[1:]:
+            if b == cur: cnt += 1
+            else: runs.append((cur, cnt)); cur = b; cnt = 1
+        runs.append((cur, cnt))
+
+        # Quitar espacios del inicio/fin
+        while runs and runs[0][0] == 0:  runs.pop(0)
+        while runs and runs[-1][0] == 0: runs.pop()
+        if len(runs) < 10: return None
+
+        # Ancho de modulo = mediana de los runs mas pequenos
+        anchos = sorted(c for _, c in runs)
+        mod = max(1, anchos[len(anchos) // 6])
+
+        # Bitstring normalizado
+        bitstr = "".join(str(color) * max(1, round(count / mod))
+                         for color, count in runs)
+
+        # Buscar START B
+        inicio = bitstr.find(_PT[START_B])
+        if inicio < 0: return None
+
+        bitstr = bitstr[inicio:]
+        simbolos = [bitstr[i:i+11] for i in range(0, len(bitstr) - 11, 11)]
+
+        resultado = ""
+        for sym in simbolos[1:]:     # saltar START
+            if sym == STOP_PAT: break
+            val = PAT_MAP.get(sym)
+            if val is not None and val < len(_CS):
+                resultado += _CS[val]
+
+        # Quitar checksum (ultimo caracter)
+        if len(resultado) > 1:
+            resultado = resultado[:-1]
+
+        # Validar: debe tener formato SVC- u otro ID razonable
+        if len(resultado) >= 4:
+            return resultado
         return None
 
-    # Binarizar la fila
-    umbral = (min(best_row) + max(best_row)) // 2
-    bits_raw = [0 if p > umbral else 1 for p in best_row]
+    def intentar(img):
+        img_g = img.convert("L")
+        w, h  = img_g.size
+        pixels = list(img_g.getdata())
 
-    # Convertir pixeles a modulos (agrupar runs)
-    runs = []
-    if not bits_raw:
-        return None
-    cur = bits_raw[0]; cnt = 1
-    for b in bits_raw[1:]:
-        if b == cur:
-            cnt += 1
-        else:
-            runs.append((cur, cnt)); cur = b; cnt = 1
-    runs.append((cur, cnt))
+        # Probar varias filas en la zona central
+        for frac in [0.5, 0.45, 0.55, 0.4, 0.6, 0.35, 0.65]:
+            y   = int(h * frac)
+            row = pixels[y * w: y * w + w]
+            res = decodificar_fila(row)
+            if res: return res
 
-    # Eliminar zona silenciosa (runs blancos del inicio/fin)
-    while runs and runs[0][0] == 0:
-        runs.pop(0)
-    while runs and runs[-1][0] == 0:
-        runs.pop()
-    if not runs:
-        return None
-
-    # Calcular ancho de modulo como el minimo run
-    mod = min(c for _, c in runs if c > 0)
-    if mod < 1:
+        # Probar promedio de bandas horizontales
+        for y1_frac, y2_frac in [(0.4, 0.6), (0.3, 0.7)]:
+            y1 = int(h * y1_frac); y2 = int(h * y2_frac)
+            banda = []
+            for x in range(w):
+                col_vals = [pixels[y * w + x] for y in range(y1, y2)]
+                banda.append(int(sum(col_vals) / len(col_vals)))
+            res = decodificar_fila(banda)
+            if res: return res
         return None
 
-    # Normalizar a string de bits
-    bitstr = ""
-    for color, count in runs:
-        n = max(1, round(count / mod))
-        bitstr += str(color) * n
+    # --- Intento 1: imagen original ---
+    res = intentar(img_pil_original)
+    if res: return res
 
-    # Partir en simbolos de 11 bits (Code 128)
-    if len(bitstr) < 22:
-        return None
-    simbolos = [bitstr[i:i+11] for i in range(0, len(bitstr)-11, 11)]
+    # --- Intento 2: redimensionar a ancho estandar ---
+    w0, h0 = img_pil_original.size
+    for target_w in [800, 600, 1000]:
+        ratio  = target_w / w0
+        img2   = img_pil_original.resize((target_w, int(h0 * ratio)), Image.LANCZOS)
+        res    = intentar(img2)
+        if res: return res
 
-    # Encontrar START B (104)
-    inicio = -1
-    for i, s in enumerate(simbolos):
-        if s == _PT[START_B]:
-            inicio = i; break
-    if inicio < 0:
-        return None
+    # --- Intento 3: aumentar contraste ---
+    from PIL import ImageEnhance, ImageFilter
+    img_c = ImageEnhance.Contrast(img_pil_original).enhance(2.5)
+    res   = intentar(img_c)
+    if res: return res
 
-    # Decodificar
-    resultado = ""
-    for s in simbolos[inicio+1:]:
-        if s == _PT[106]:   # STOP
-            break
-        val = PAT_MAP.get(s)
-        if val is None:
-            continue
-        if val < len(_CS):
-            resultado += _CS[val]
+    # --- Intento 4: enfocar ---
+    img_f = img_pil_original.filter(ImageFilter.SHARPEN)
+    res   = intentar(img_f)
+    if res: return res
 
-    # Quitar el ultimo caracter (checksum)
-    if len(resultado) > 1:
-        resultado = resultado[:-1]
-
-    return resultado if resultado else None
+    return None
 
 
 def _mostrar_servicio(svc):
-    """Muestra la tarjeta de info de un servicio."""
     icono = "🔴" if svc["estado"]=="Pendiente" else "🔵" if svc["estado"]=="En Proceso" else "🟢"
     st.markdown(f"""
     <div class="card">
@@ -519,224 +529,60 @@ def pg_buscar():
     st.markdown("# 🔍 Buscar Servicio")
     st.divider()
 
-    # ── Pestaña 1: escáner en vivo | Pestaña 2: foto | Pestaña 3: manual
-    tab1, tab2, tab3 = st.tabs([
-        "📷  Cámara en vivo",
-        "🖼  Subir foto",
-        "✍️  Escribir ID",
-    ])
+    tab1, tab2 = st.tabs(["📷  Cámara", "✍️  Escribir ID"])
 
-    # ────────────────────────────────────────────────────
-    # TAB 1 — Escáner en vivo (funciona en iPhone/Android)
-    # Usa la API de cámara del navegador + biblioteca ZXing
-    # que corre 100% en JavaScript, sin necesitar Python.
-    # ────────────────────────────────────────────────────
+    # ── TAB 1: Cámara ──────────────────────────────────────────────
     with tab1:
-        st.markdown("Apunta la cámara al código de barra. Se detecta automáticamente.")
+        st.markdown(
+            "Apunta al código de barra impreso y toma la foto. "
+            "Funciona desde el iPhone, Android o cualquier computadora."
+        )
+        st.info(
+            "💡 **Consejos para que funcione bien:**\n"
+            "- Imprime el código en papel blanco (usa la opción ⬇ Descargar al crear el servicio)\n"
+            "- Buena luz, sin sombras sobre el código\n"
+            "- El código debe ocupar al menos la mitad del ancho de la foto\n"
+            "- Mantén la cámara paralela al papel, sin ángulo"
+        )
 
-        # Construir lista de IDs conocidos para buscar tras escaneo
-        svcs_conocidos = todos_los_servicios()
-        ids_json = str([s["id"] for s in svcs_conocidos]).replace("'", '"')
+        foto = st.camera_input("Tomar foto del código", label_visibility="collapsed")
 
-        scanner_html = f"""
-        <div style="font-family:'DM Sans',sans-serif;max-width:500px;margin:0 auto">
+        if foto:
+            img = Image.open(foto)
 
-          <!-- Área de video -->
-          <div id="cam-wrap" style="background:#0D1117;border:1px solid #30363D;
-               border-radius:12px;overflow:hidden;position:relative;min-height:280px;
-               display:flex;align-items:center;justify-content:center">
-            <video id="video" autoplay playsinline muted
-                   style="width:100%;display:none;border-radius:11px"></video>
-            <canvas id="canvas" style="display:none"></canvas>
-            <!-- línea de escaneo animada -->
-            <div id="scanline" style="display:none;position:absolute;left:5%;width:90%;
-                 height:2px;background:#3FB950;box-shadow:0 0 8px #3FB950;
-                 animation:scan 1.6s ease-in-out infinite"></div>
-            <!-- placeholder -->
-            <div id="placeholder" style="text-align:center;padding:40px 20px;color:#7D8590">
-              <div style="font-size:3rem">📷</div>
-              <p style="font-size:.85rem;margin-top:8px">
-                Presiona el botón para activar la cámara
-              </p>
-            </div>
-          </div>
-
-          <!-- Resultado del escaneo -->
-          <div id="resultado" style="min-height:36px;margin:10px 0;padding:10px 14px;
-               border-radius:8px;font-size:.85rem;display:none"></div>
-
-          <!-- Botón cámara -->
-          <button id="btn-cam" onclick="toggleCam()"
-            style="width:100%;padding:12px;margin-top:6px;
-                   background:#21262D;color:#58A6FF;
-                   border:1px solid #30363D;border-radius:8px;
-                   font-size:.9rem;font-weight:600;cursor:pointer">
-            ▶ Activar Cámara
-          </button>
-
-          <!-- Enviar resultado a Streamlit -->
-          <input type="hidden" id="codigo-out"/>
-        </div>
-
-        <style>
-          @keyframes scan {{
-            0%,100% {{ top:15% }} 50% {{ top:80% }}
-          }}
-        </style>
-
-        <!-- ZXing: librería profesional de lectura de códigos de barra -->
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.20.0/umd/index.min.js"></script>
-        <script>
-        const KNOWN_IDS = {ids_json};
-        let codeReader = null;
-        let activa = false;
-
-        async function toggleCam() {{
-          activa ? detener() : activar();
-        }}
-
-        async function activar() {{
-          const btn = document.getElementById('btn-cam');
-          btn.textContent = '⏳ Iniciando...';
-          btn.disabled = true;
-
-          try {{
-            // ZXing BrowserMultiFormatReader: lee Code128, QR, EAN, etc.
-            codeReader = new ZXing.BrowserMultiFormatReader();
-            const devices = await ZXing.BrowserCodeReader.listVideoInputDevices();
-
-            // Preferir cámara trasera (iPhone/Android)
-            let deviceId = undefined;
-            const trasera = devices.find(d =>
-              d.label.toLowerCase().includes('back') ||
-              d.label.toLowerCase().includes('rear') ||
-              d.label.toLowerCase().includes('environment')
-            );
-            if (trasera) deviceId = trasera.deviceId;
-
-            document.getElementById('placeholder').style.display = 'none';
-            document.getElementById('scanline').style.display = 'block';
-
-            await codeReader.decodeFromVideoDevice(
-              deviceId,
-              'video',
-              (result, err) => {{
-                if (result) {{
-                  const texto = result.getText();
-                  document.getElementById('video').style.display = 'block';
-                  mostrarResultado(texto);
-                }}
-              }}
-            );
-            document.getElementById('video').style.display = 'block';
-            btn.textContent = '⏹ Detener Cámara';
-            btn.style.color = '#F78166';
-            btn.disabled = false;
-            activa = true;
-
-          }} catch(e) {{
-            btn.textContent = '▶ Activar Cámara';
-            btn.disabled = false;
-            mostrarError('No se pudo acceder a la cámara. Revisa los permisos.');
-          }}
-        }}
-
-        function detener() {{
-          if (codeReader) {{ codeReader.reset(); codeReader = null; }}
-          document.getElementById('video').style.display = 'none';
-          document.getElementById('scanline').style.display = 'none';
-          document.getElementById('placeholder').style.display = 'block';
-          const btn = document.getElementById('btn-cam');
-          btn.textContent = '▶ Activar Cámara';
-          btn.style.color = '#58A6FF';
-          activa = false;
-        }}
-
-        function mostrarResultado(codigo) {{
-          detener();
-          const div = document.getElementById('resultado');
-          div.style.display = 'block';
-          div.style.background = '#0D3320';
-          div.style.border = '1px solid #3FB950';
-          div.style.color = '#3FB950';
-          div.textContent = '✅ Código detectado: ' + codigo;
-
-          // Enviar el codigo a Streamlit via query param
-          const url = new URL(window.location.href);
-          url.searchParams.set('scanned', codigo);
-          window.location.href = url.toString();
-        }}
-
-        function mostrarError(msg) {{
-          const div = document.getElementById('resultado');
-          div.style.display = 'block';
-          div.style.background = '#3D0000';
-          div.style.border = '1px solid #F78166';
-          div.style.color = '#F78166';
-          div.textContent = '⚠ ' + msg;
-        }}
-        </script>
-        """
-        st.components.v1.html(scanner_html, height=420)
-
-        # Recibir el código escaneado via query params
-        params = st.query_params
-        if "scanned" in params:
-            codigo_cam = params["scanned"]
-            st.success(f"✅ Código escaneado: **{codigo_cam}**")
-            svc = buscar_por_id(codigo_cam.strip())
-            if svc:
-                _mostrar_servicio(svc)
-            else:
-                st.warning(f"No se encontró el servicio con ID: **{codigo_cam}**")
-            if st.button("🔄 Escanear otro código"):
-                st.query_params.clear()
-                st.rerun()
-
-    # ────────────────────────────────────────────────────
-    # TAB 2 — Subir foto y leer con Python puro
-    # ────────────────────────────────────────────────────
-    with tab2:
-        st.markdown("Toma una foto del código e impórtala aquí.")
-        foto = st.camera_input("📸 Tomar foto", label_visibility="collapsed")
-        if foto is None:
-            archivo = st.file_uploader(
-                "O selecciona una imagen guardada",
-                type=["png","jpg","jpeg"],
-                label_visibility="visible"
-            )
-        else:
-            archivo = foto
-
-        if archivo is not None:
-            img_pil = Image.open(archivo)
-            col_a, col_b = st.columns([1,1])
-            with col_a:
-                st.image(img_pil, caption="Imagen cargada", use_container_width=True)
-            with col_b:
+            col_foto, col_res = st.columns([1, 1])
+            with col_foto:
+                st.image(img, caption="Foto tomada", use_container_width=True)
+            with col_res:
                 with st.spinner("Leyendo código..."):
-                    codigo_foto = _leer_barcode_python(img_pil)
-                if codigo_foto:
-                    st.success(f"✅ Código leído: **{codigo_foto}**")
-                    svc = buscar_por_id(codigo_foto.strip())
+                    codigo = _leer_barcode_python(img)
+
+                if codigo:
+                    st.success(f"✅ Código leído:\n\n**{codigo}**")
+                    svc = buscar_por_id(codigo.strip())
                     if svc:
                         _mostrar_servicio(svc)
                     else:
-                        st.warning("Código leído, pero no existe en la base de datos.")
+                        st.warning(
+                            f"Se leyó **{codigo}** pero no existe "
+                            "ese servicio en la base de datos."
+                        )
                 else:
-                    st.error(
-                        "No se pudo leer el código automáticamente.\n\n"
-                        "**Prueba:** ir a la pestaña **Cámara en vivo** "
-                        "o escribir el ID en la pestaña **Escribir ID**."
+                    st.error("No se pudo leer el código automáticamente.")
+                    st.markdown(
+                        "**¿Qué hacer?**\n"
+                        "1. Intenta con mejor iluminación\n"
+                        "2. El código debe estar horizontal y bien enfocado\n"
+                        "3. O copia el ID del código impreso y úsalo en la pestaña **Escribir ID**"
                     )
 
-    # ────────────────────────────────────────────────────
-    # TAB 3 — Manual + lista
-    # ────────────────────────────────────────────────────
-    with tab3:
+    # ── TAB 2: Manual ──────────────────────────────────────────────
+    with tab2:
         col1, col2 = st.columns([3, 1])
-        sid_manual = col1.text_input("ID del servicio",
-                     placeholder="Ej: SVC-20250321-0001")
+        sid_manual = col1.text_input(
+            "ID del servicio",
+            placeholder="Ej: SVC-20250321-0001"
+        )
         if col2.button("🔍 Buscar", use_container_width=True) and sid_manual:
             svc = buscar_por_id(sid_manual.strip())
             if not svc:
@@ -750,7 +596,7 @@ def pg_buscar():
         svcs = todos_los_servicios()
         if svcs:
             opciones = {f"{s['id']} — {s['cliente']}": s["id"] for s in svcs}
-            sel = st.selectbox("Seleccionar", [""] + list(opciones.keys()))
+            sel = st.selectbox("Seleccionar servicio", [""] + list(opciones.keys()))
             if sel:
                 svc = buscar_por_id(opciones[sel])
                 if svc:
@@ -765,9 +611,6 @@ def pg_buscar():
         else:
             st.info("Aún no hay servicios creados.")
 
-# ─────────────────────────────────────────────────────────
-#  PAGINA: ESTADISTICAS
-# ─────────────────────────────────────────────────────────
 def pg_estadisticas():
     st.markdown("# 📈 Estadísticas")
     st.divider()
