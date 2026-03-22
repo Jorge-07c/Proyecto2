@@ -1,4 +1,3 @@
-
 import streamlit as st
 import sqlite3, datetime, uuid, io, base64, random
 from PIL import Image, ImageDraw, ImageFont
@@ -377,90 +376,79 @@ def pg_inventario():
 # ─────────────────────────────────────────────────────────
 #  PAGINA: BUSCAR / ESCANEAR
 # ─────────────────────────────────────────────────────────
+def _leer_barcode_de_imagen(img_pil):
+    """Lee el codigo de barra de una imagen PIL usando pyzbar."""
+    try:
+        from pyzbar import pyzbar
+        codigos = pyzbar.decode(img_pil.convert("RGB"))
+        if codigos:
+            return codigos[0].data.decode("utf-8")
+    except Exception:
+        pass
+    return None
+
+def _mostrar_servicio(svc):
+    """Muestra la tarjeta de info de un servicio."""
+    icono = "🔴" if svc["estado"]=="Pendiente" else "🔵" if svc["estado"]=="En Proceso" else "🟢"
+    st.markdown(f"""
+    <div class="card">
+      <b style="color:#58A6FF;font-size:1rem">{svc['id']}</b><br/><br/>
+      👤 Cliente: <b>{svc['cliente']}</b><br/>
+      🔧 Servicio: <span style="color:#7D8590">{svc['descripcion']}</span><br/>
+      📂 Categoría: <b>{svc['categoria']}</b><br/>
+      {icono} Estado: <b>{svc['estado']}</b><br/>
+      👷 Técnico: <b>{svc['tecnico'] or '—'}</b><br/>
+      <span style="font-size:.78rem;color:#7D8590">
+      Creado: {svc['creado_en']} · Actualizado: {svc['actualizado']}</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 def pg_buscar():
     st.markdown("# 🔍 Buscar Servicio")
     st.divider()
 
-    # Escáner por cámara
-    st.markdown("### 📷 Opción 1 — Escanear con la cámara")
+    # ── Opción 1: subir foto o usar cámara ────────────────────────
+    st.markdown("### 📷 Opción 1 — Foto del código de barra")
     st.markdown(
         '<div class="card">'
-        '<p style="font-size:.85rem;color:#7D8590">La cámara del navegador lee el código de barra '
-        'y busca el servicio automáticamente.<br/>'
-        '<b style="color:#58A6FF">Nota:</b> funciona en Chrome y Edge sobre HTTPS '
-        '(por ejemplo, al usar Streamlit Cloud).</p>'
+        '<p style="font-size:.85rem;color:#7D8590">'
+        'Sube una foto del código de barra impreso '
+        '(desde tu teléfono, cámara o computadora). '
+        'La app lo leerá automáticamente.</p>'
         '</div>', unsafe_allow_html=True)
 
-    camara_html = """
-    <div style="background:#161B22;border:1px solid #30363D;border-radius:10px;padding:16px;margin:8px 0">
-      <video id="video" width="100%" style="border-radius:8px;display:none"></video>
-      <div id="placeholder" style="text-align:center;padding:30px;color:#7D8590">
-        <p style="font-size:2rem">📷</p>
-        <p style="font-size:.85rem">Presiona el botón para activar la cámara</p>
-      </div>
-      <p id="resultado" style="font-family:monospace;color:#3FB950;text-align:center;margin-top:8px;min-height:20px"></p>
-      <button id="btnCam"
-        style="width:100%;margin-top:10px;padding:10px;background:#21262D;
-               color:#58A6FF;border:1px solid #30363D;border-radius:8px;
-               font-size:.9rem;cursor:pointer"
-        onclick="toggleCam()">▶ Activar Cámara</button>
-    </div>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
-    <script>
-    let stream = null; let timer = null; let activa = false;
-    function toggleCam() {
-      activa ? detener() : activar();
-    }
-    async function activar() {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}}});
-        const v = document.getElementById("video");
-        v.srcObject = stream; v.style.display = "block";
-        document.getElementById("placeholder").style.display = "none";
-        document.getElementById("btnCam").textContent = "⏹ Detener Cámara";
-        activa = true;
-        escanear(v);
-      } catch(e) {
-        document.getElementById("resultado").textContent = "⚠ No se pudo acceder a la cámara";
-        document.getElementById("resultado").style.color = "#F78166";
-      }
-    }
-    function detener() {
-      if (stream) stream.getTracks().forEach(t => t.stop());
-      if (timer)  clearInterval(timer);
-      document.getElementById("video").style.display = "none";
-      document.getElementById("placeholder").style.display = "block";
-      document.getElementById("btnCam").textContent = "▶ Activar Cámara";
-      activa = false;
-    }
-    function escanear(v) {
-      const c = document.createElement("canvas");
-      const ctx = c.getContext("2d");
-      let ultimo = ""; let repetido = 0;
-      timer = setInterval(() => {
-        if (v.readyState < 2) return;
-        c.width = v.videoWidth; c.height = v.videoHeight;
-        ctx.drawImage(v, 0, 0);
-        const img = ctx.getImageData(0, 0, c.width, c.height);
-        const qr  = jsQR(img.data, img.width, img.height);
-        if (qr && qr.data) {
-          if (qr.data === ultimo) { repetido++; } else { ultimo = qr.data; repetido = 1; }
-          if (repetido >= 2) {
-            document.getElementById("resultado").textContent = "✓ Código leído: " + qr.data;
-            document.getElementById("resultado").style.color = "#3FB950";
-            clearInterval(timer);
-            detener();
-          }
-        }
-      }, 250);
-    }
-    </script>
-    """
-    st.components.v1.html(camara_html, height=320)
+    archivo = st.file_uploader(
+        "📂 Seleccionar imagen del código de barra",
+        type=["png", "jpg", "jpeg"],
+        label_visibility="collapsed"
+    )
+
+    if archivo is not None:
+        img_pil = Image.open(archivo)
+        col_img, col_res = st.columns([1, 1])
+        with col_img:
+            st.image(img_pil, caption="Imagen cargada", use_container_width=True)
+        with col_res:
+            with st.spinner("Leyendo código..."):
+                codigo_leido = _leer_barcode_de_imagen(img_pil)
+            if codigo_leido:
+                st.success(f"✅ Código leído:\n**{codigo_leido}**")
+                svc = buscar_por_id(codigo_leido.strip())
+                if svc:
+                    _mostrar_servicio(svc)
+                else:
+                    st.warning("Código leído, pero no existe ese servicio en la base de datos.")
+            else:
+                st.error(
+                    "No se pudo leer el código.\n\n"
+                    "**Consejos:** buena luz, código enfocado, "
+                    "fondo blanco.\n\nO escribe el ID abajo."
+                )
 
     st.divider()
     st.markdown("### ✍️ Opción 2 — Escribir el ID del servicio")
-    col1, col2 = st.columns([3,1])
+    col1, col2 = st.columns([3, 1])
     sid_manual = col1.text_input("ID del servicio", placeholder="Ej: SVC-20250321-0001")
     if col2.button("🔍 Buscar", use_container_width=True) and sid_manual:
         svc = buscar_por_id(sid_manual.strip())
@@ -468,42 +456,28 @@ def pg_buscar():
             st.error(f"No se encontró ningún servicio con ID: **{sid_manual}**")
         else:
             st.success("✅ Servicio encontrado")
-            icono = "🔴" if svc["estado"]=="Pendiente" else "🔵" if svc["estado"]=="En Proceso" else "🟢"
-            st.markdown(f"""
-            <div class="card">
-              <b style="color:#58A6FF">{svc['id']}</b><br/>
-              <b>{svc['cliente']}</b><br/>
-              <span style="color:#7D8590;font-size:.85rem">{svc['descripcion']}</span><br/><br/>
-              Categoría: <b>{svc['categoria']}</b> &nbsp;·&nbsp;
-              Estado: <b>{icono} {svc['estado']}</b> &nbsp;·&nbsp;
-              Técnico: <b>{svc['tecnico'] or '—'}</b><br/>
-              <span style="font-size:.78rem;color:#7D8590">Creado: {svc['creado_en']} · Actualizado: {svc['actualizado']}</span>
-            </div>
-            """, unsafe_allow_html=True)
-            st.markdown("**Código de barra:**")
+            _mostrar_servicio(svc)
             mostrar_barcode(svc["id"], ancho=300)
 
     st.divider()
-    st.markdown("### ¿No tienes el ID? Elige de la lista:")
+    st.markdown("### 📋 Opción 3 — Elegir de la lista")
     svcs = todos_los_servicios()
     if svcs:
         opciones = {f"{s['id']} — {s['cliente']}": s["id"] for s in svcs}
-        sel = st.selectbox("Seleccionar", [""] + list(opciones.keys()))
+        sel = st.selectbox("Seleccionar servicio", [""] + list(opciones.keys()))
         if sel:
             svc = buscar_por_id(opciones[sel])
             if svc:
-                icono = "🔴" if svc["estado"]=="Pendiente" else "🔵" if svc["estado"]=="En Proceso" else "🟢"
-                st.markdown(f"""
-                <div class="card">
-                  <b style="color:#58A6FF">{svc['id']}</b> &nbsp;·&nbsp;
-                  <b>{svc['cliente']}</b><br/>
-                  <span style="color:#7D8590;font-size:.85rem">{svc['descripcion']}</span><br/><br/>
-                  Estado: <b>{icono} {svc['estado']}</b>
-                </div>
-                """, unsafe_allow_html=True)
+                _mostrar_servicio(svc)
                 mostrar_barcode(svc["id"], ancho=300)
-                st.download_button("⬇ Descargar código", hacer_barcode(svc["id"]),
-                                   f"barcode_{svc['id']}.png", "image/png")
+                st.download_button(
+                    "⬇ Descargar código de barra",
+                    hacer_barcode(svc["id"]),
+                    f"barcode_{svc['id']}.png",
+                    "image/png"
+                )
+    elif not svcs:
+        st.info("Aún no hay servicios. Crea uno primero.")
 
 # ─────────────────────────────────────────────────────────
 #  PAGINA: ESTADISTICAS
