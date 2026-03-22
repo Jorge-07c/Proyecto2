@@ -529,55 +529,169 @@ def pg_buscar():
     st.markdown("# 🔍 Buscar Servicio")
     st.divider()
 
-    tab1, tab2 = st.tabs(["📷  Cámara", "✍️  Escribir ID"])
+    tab1, tab2, tab3 = st.tabs(["📷  Cámara en vivo", "🖼  Subir foto", "✍️  Escribir ID"])
 
-    # ── TAB 1: Cámara ──────────────────────────────────────────────
+    # ── TAB 1: Escáner en vivo con html5-qrcode ────────────────────
+    # html5-qrcode es la librería más compatible con Safari/iPhone.
+    # Lee Code128, QR y otros formatos directamente en el navegador.
     with tab1:
-        st.markdown(
-            "Apunta al código de barra impreso y toma la foto. "
-            "Funciona desde el iPhone, Android o cualquier computadora."
-        )
-        st.info(
-            "💡 **Consejos para que funcione bien:**\n"
-            "- Imprime el código en papel blanco (usa la opción ⬇ Descargar al crear el servicio)\n"
-            "- Buena luz, sin sombras sobre el código\n"
-            "- El código debe ocupar al menos la mitad del ancho de la foto\n"
-            "- Mantén la cámara paralela al papel, sin ángulo"
-        )
+        st.markdown("Apunta la cámara al código — se detecta automáticamente.")
 
-        foto = st.camera_input("Tomar foto del código", label_visibility="collapsed")
+        scanner_html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta name="viewport" content="width=device-width, initial-scale=1"/>
+          <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+          <style>
+            * { box-sizing: border-box; margin: 0; padding: 0; }
+            body { background: transparent; font-family: sans-serif; }
+            #lector { width: 100%; border-radius: 12px; overflow: hidden; }
+            #resultado {
+              margin-top: 10px; padding: 12px 16px; border-radius: 8px;
+              font-size: .88rem; display: none;
+            }
+            .ok  { background:#0D3320; border:1px solid #3FB950; color:#3FB950; }
+            .err { background:#3D0000; border:1px solid #F78166; color:#F78166; }
+            #btn {
+              width: 100%; padding: 12px; margin-top: 10px;
+              background: #21262D; color: #58A6FF;
+              border: 1px solid #30363D; border-radius: 8px;
+              font-size: .9rem; font-weight: 600; cursor: pointer;
+            }
+            #btn:disabled { opacity: .5; cursor: default; }
+          </style>
+        </head>
+        <body>
+          <div id="lector"></div>
+          <div id="resultado"></div>
+          <button id="btn" onclick="iniciar()">▶ Activar Cámara</button>
 
+          <script>
+          let scanner = null;
+          let encendido = false;
+
+          function iniciar() {
+            if (encendido) { apagar(); return; }
+
+            const btn = document.getElementById("btn");
+            btn.disabled = true;
+            btn.textContent = "⏳ Iniciando...";
+
+            scanner = new Html5Qrcode("lector");
+
+            // Configuración: soporta Code128, QR, EAN y más
+            const config = {
+              fps: 10,
+              qrbox: { width: 280, height: 120 },
+              aspectRatio: 1.5,
+              formatsToSupport: [
+                Html5QrcodeSupportedFormats.CODE_128,
+                Html5QrcodeSupportedFormats.QR_CODE,
+                Html5QrcodeSupportedFormats.EAN_13,
+                Html5QrcodeSupportedFormats.CODE_39
+              ]
+            };
+
+            // environment = cámara trasera (iPhone/Android)
+            scanner.start(
+              { facingMode: "environment" },
+              config,
+              (texto) => {
+                // ¡Código detectado!
+                mostrarOk("✅ Código leído: " + texto);
+                apagar();
+                // Pasar el código a Streamlit recargando con ?scanned=...
+                const url = new URL(window.parent.location.href);
+                url.searchParams.set("scanned", texto);
+                window.parent.location.href = url.toString();
+              },
+              (error) => { /* errores de frame son normales, ignorar */ }
+            ).then(() => {
+              encendido = true;
+              btn.disabled = false;
+              btn.textContent = "⏹ Detener Cámara";
+              btn.style.color = "#F78166";
+            }).catch((e) => {
+              btn.disabled = false;
+              btn.textContent = "▶ Activar Cámara";
+              mostrarErr("No se pudo acceder a la cámara: " + e);
+            });
+          }
+
+          function apagar() {
+            if (scanner) {
+              scanner.stop().catch(() => {});
+              scanner.clear();
+              scanner = null;
+            }
+            encendido = false;
+            const btn = document.getElementById("btn");
+            btn.textContent = "▶ Activar Cámara";
+            btn.style.color = "#58A6FF";
+          }
+
+          function mostrarOk(msg) {
+            const d = document.getElementById("resultado");
+            d.className = "ok"; d.textContent = msg; d.style.display = "block";
+          }
+          function mostrarErr(msg) {
+            const d = document.getElementById("resultado");
+            d.className = "err"; d.textContent = msg; d.style.display = "block";
+          }
+          </script>
+        </body>
+        </html>
+        """
+        st.components.v1.html(scanner_html, height=480)
+
+        # Recibir código escaneado vía query params
+        params = st.query_params
+        if "scanned" in params:
+            codigo_cam = params["scanned"]
+            st.success(f"✅ Código escaneado: **{codigo_cam}**")
+            svc = buscar_por_id(codigo_cam.strip())
+            if svc:
+                _mostrar_servicio(svc)
+            else:
+                st.warning(f"Código leído (**{codigo_cam}**) pero no existe en la base de datos.")
+            if st.button("🔄 Escanear otro"):
+                st.query_params.clear()
+                st.rerun()
+
+    # ── TAB 2: Subir foto ──────────────────────────────────────────
+    with tab2:
+        st.markdown("Toma una foto del código con tu teléfono y súbela aquí.")
+        foto = st.camera_input("Tomar foto", label_visibility="collapsed")
+        if foto is None:
+            foto = st.file_uploader(
+                "O selecciona una imagen guardada",
+                type=["png","jpg","jpeg"]
+            )
         if foto:
             img = Image.open(foto)
-
-            col_foto, col_res = st.columns([1, 1])
-            with col_foto:
-                st.image(img, caption="Foto tomada", use_container_width=True)
-            with col_res:
+            col_a, col_b = st.columns([1, 1])
+            with col_a:
+                st.image(img, caption="Imagen cargada", use_container_width=True)
+            with col_b:
                 with st.spinner("Leyendo código..."):
-                    codigo = _leer_barcode_python(img)
-
-                if codigo:
-                    st.success(f"✅ Código leído:\n\n**{codigo}**")
-                    svc = buscar_por_id(codigo.strip())
+                    codigo_foto = _leer_barcode_python(img)
+                if codigo_foto:
+                    st.success(f"✅ Código leído:\n\n**{codigo_foto}**")
+                    svc = buscar_por_id(codigo_foto.strip())
                     if svc:
                         _mostrar_servicio(svc)
                     else:
-                        st.warning(
-                            f"Se leyó **{codigo}** pero no existe "
-                            "ese servicio en la base de datos."
-                        )
+                        st.warning("Código leído pero no existe ese servicio.")
                 else:
-                    st.error("No se pudo leer el código automáticamente.")
-                    st.markdown(
-                        "**¿Qué hacer?**\n"
-                        "1. Intenta con mejor iluminación\n"
-                        "2. El código debe estar horizontal y bien enfocado\n"
-                        "3. O copia el ID del código impreso y úsalo en la pestaña **Escribir ID**"
+                    st.error(
+                        "No se pudo leer automáticamente.\n\n"
+                        "**Prueba:** usar la pestaña **Cámara en vivo** "
+                        "o escribe el ID en **Escribir ID**."
                     )
 
-    # ── TAB 2: Manual ──────────────────────────────────────────────
-    with tab2:
+    # ── TAB 3: Manual + lista ──────────────────────────────────────
+    with tab3:
         col1, col2 = st.columns([3, 1])
         sid_manual = col1.text_input(
             "ID del servicio",
