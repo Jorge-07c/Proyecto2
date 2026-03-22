@@ -529,152 +529,171 @@ def pg_buscar():
     st.markdown("# 🔍 Buscar Servicio")
     st.divider()
 
+    # Leer código escaneado del session_state
+    if "codigo_escaneado" not in st.session_state:
+        st.session_state.codigo_escaneado = ""
+
     tab1, tab2, tab3 = st.tabs(["📷  Cámara en vivo", "🖼  Subir foto", "✍️  Escribir ID"])
 
-    # ── TAB 1: Escáner en vivo con html5-qrcode ────────────────────
-    # html5-qrcode es la librería más compatible con Safari/iPhone.
-    # Lee Code128, QR y otros formatos directamente en el navegador.
+    # ── TAB 1: Escáner en vivo ─────────────────────────────────────
     with tab1:
-        st.markdown("Apunta la cámara al código — se detecta automáticamente.")
 
-        scanner_html = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <meta name="viewport" content="width=device-width, initial-scale=1"/>
-          <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-          <style>
-            * { box-sizing: border-box; margin: 0; padding: 0; }
-            body { background: transparent; font-family: sans-serif; }
-            #lector { width: 100%; border-radius: 12px; overflow: hidden; }
-            #resultado {
-              margin-top: 10px; padding: 12px 16px; border-radius: 8px;
-              font-size: .88rem; display: none;
-            }
-            .ok  { background:#0D3320; border:1px solid #3FB950; color:#3FB950; }
-            .err { background:#3D0000; border:1px solid #F78166; color:#F78166; }
-            #btn {
-              width: 100%; padding: 12px; margin-top: 10px;
-              background: #21262D; color: #58A6FF;
-              border: 1px solid #30363D; border-radius: 8px;
-              font-size: .9rem; font-weight: 600; cursor: pointer;
-            }
-            #btn:disabled { opacity: .5; cursor: default; }
-          </style>
-        </head>
-        <body>
-          <div id="lector"></div>
-          <div id="resultado"></div>
-          <button id="btn" onclick="iniciar()">▶ Activar Cámara</button>
-
-          <script>
-          let scanner = null;
-          let encendido = false;
-
-          function iniciar() {
-            if (encendido) { apagar(); return; }
-
-            const btn = document.getElementById("btn");
-            btn.disabled = true;
-            btn.textContent = "⏳ Iniciando...";
-
-            scanner = new Html5Qrcode("lector");
-
-            // Configuración: soporta Code128, QR, EAN y más
-            const config = {
-              fps: 10,
-              qrbox: { width: 280, height: 120 },
-              aspectRatio: 1.5,
-              formatsToSupport: [
-                Html5QrcodeSupportedFormats.CODE_128,
-                Html5QrcodeSupportedFormats.QR_CODE,
-                Html5QrcodeSupportedFormats.EAN_13,
-                Html5QrcodeSupportedFormats.CODE_39
-              ]
-            };
-
-            // environment = cámara trasera (iPhone/Android)
-            scanner.start(
-              { facingMode: "environment" },
-              config,
-              (texto) => {
-                // ¡Código detectado!
-                // Limpiar el texto: quitar espacios y caracteres raros
-                const limpio = texto.trim();
-                mostrarOk("✅ Código leído: " + limpio);
-                apagar();
-                // Pasar el código a Streamlit.
-                // Usamos btoa para evitar que los caracteres especiales
-                // se corrompan en la URL (el problema del SVC#"-2...)
-                const encoded = btoa(unescape(encodeURIComponent(limpio)));
-                const url = new URL(window.parent.location.href);
-                url.searchParams.set("scanned", encoded);
-                url.searchParams.set("b64", "1");
-                window.parent.location.href = url.toString();
-              },
-              (error) => { /* errores de frame son normales, ignorar */ }
-            ).then(() => {
-              encendido = true;
-              btn.disabled = false;
-              btn.textContent = "⏹ Detener Cámara";
-              btn.style.color = "#F78166";
-            }).catch((e) => {
-              btn.disabled = false;
-              btn.textContent = "▶ Activar Cámara";
-              mostrarErr("No se pudo acceder a la cámara: " + e);
-            });
-          }
-
-          function apagar() {
-            if (scanner) {
-              scanner.stop().catch(() => {});
-              scanner.clear();
-              scanner = null;
-            }
-            encendido = false;
-            const btn = document.getElementById("btn");
-            btn.textContent = "▶ Activar Cámara";
-            btn.style.color = "#58A6FF";
-          }
-
-          function mostrarOk(msg) {
-            const d = document.getElementById("resultado");
-            d.className = "ok"; d.textContent = msg; d.style.display = "block";
-          }
-          function mostrarErr(msg) {
-            const d = document.getElementById("resultado");
-            d.className = "err"; d.textContent = msg; d.style.display = "block";
-          }
-          </script>
-        </body>
-        </html>
-        """
-        st.components.v1.html(scanner_html, height=480)
-
-        # Recibir código escaneado vía query params
-        params = st.query_params
-        if "scanned" in params:
-            raw = params["scanned"]
-            # Si viene en base64 (b64=1), decodificar
-            if params.get("b64") == "1":
-                try:
-                    import base64 as _b64
-                    codigo_cam = _b64.b64decode(raw).decode("utf-8").strip()
-                except Exception:
-                    codigo_cam = raw.strip()
-            else:
-                import html as _html
-                codigo_cam = _html.unescape(raw).strip()
-
-            st.success(f"✅ Código escaneado: **{codigo_cam}**")
-            svc = buscar_por_id(codigo_cam)
+        # Si ya hay un código escaneado, mostrar el resultado
+        if st.session_state.codigo_escaneado:
+            codigo = st.session_state.codigo_escaneado
+            st.success(f"✅ Código detectado: **{codigo}**")
+            svc = buscar_por_id(codigo)
             if svc:
                 _mostrar_servicio(svc)
             else:
-                st.warning(f"Código leído (**{codigo_cam}**) pero no existe en la base de datos.")
-            if st.button("🔄 Escanear otro"):
-                st.query_params.clear()
+                st.warning(f"Se leyó **{codigo}** pero no existe en la base de datos.")
+            if st.button("🔄 Escanear otro código", use_container_width=True):
+                st.session_state.codigo_escaneado = ""
                 st.rerun()
+
+        # Escáner — solo se muestra si no hay código todavía
+        else:
+            st.markdown("Apunta la cámara al código — se detecta solo.")
+
+            scanner_html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta name="viewport" content="width=device-width, initial-scale=1"/>
+              <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+              <style>
+                * { box-sizing:border-box; margin:0; padding:0; }
+                body { background:transparent; font-family:sans-serif; padding:4px; }
+                #lector { width:100%; border-radius:12px; overflow:hidden; }
+                #msg {
+                  margin-top:10px; padding:12px 16px; border-radius:8px;
+                  font-size:.88rem; font-weight:600; display:none; text-align:center;
+                }
+                .ok  { background:#0D3320; border:1px solid #3FB950; color:#3FB950; }
+                .err { background:#3D0000; border:1px solid #F78166; color:#F78166; }
+                #btn {
+                  width:100%; padding:13px; margin-top:10px;
+                  background:#21262D; color:#58A6FF;
+                  border:1px solid #30363D; border-radius:8px;
+                  font-size:.92rem; font-weight:700; cursor:pointer;
+                  transition: all .2s;
+                }
+                #btn:hover { border-color:#58A6FF; }
+                #btn:disabled { opacity:.5; cursor:default; }
+              </style>
+            </head>
+            <body>
+              <div id="lector"></div>
+              <div id="msg"></div>
+              <button id="btn" onclick="toggle()">▶ Activar Cámara</button>
+
+              <script>
+              let scanner = null;
+              let activa  = false;
+              let leido   = false;
+
+              function toggle() {
+                activa ? apagar() : activar();
+              }
+
+              async function activar() {
+                const btn = document.getElementById("btn");
+                btn.disabled = true;
+                btn.textContent = "⏳ Iniciando...";
+
+                try {
+                  scanner = new Html5Qrcode("lector");
+
+                  await scanner.start(
+                    { facingMode: "environment" },
+                    {
+                      fps: 12,
+                      qrbox: { width: 260, height: 110 },
+                      aspectRatio: 1.6,
+                      formatsToSupport: [
+                        Html5QrcodeSupportedFormats.CODE_128,
+                        Html5QrcodeSupportedFormats.QR_CODE,
+                        Html5QrcodeSupportedFormats.CODE_39,
+                        Html5QrcodeSupportedFormats.EAN_13
+                      ]
+                    },
+                    (texto) => {
+                      if (leido) return;   // ignorar lecturas dobles
+                      leido = true;
+
+                      const codigo = texto.trim();
+                      mostrar("ok", "✅ Leído: " + codigo);
+                      apagar();
+
+                      // Enviar al iframe padre de Streamlit via postMessage
+                      window.parent.postMessage(
+                        { type: "streamlit:setComponentValue", value: codigo },
+                        "*"
+                      );
+                    },
+                    () => {}   // errores de frame: ignorar
+                  );
+
+                  activa = true;
+                  btn.disabled = false;
+                  btn.textContent = "⏹ Detener Cámara";
+                  btn.style.color = "#F78166";
+
+                } catch(e) {
+                  btn.disabled = false;
+                  btn.textContent = "▶ Activar Cámara";
+                  mostrar("err", "⚠ No se pudo acceder a la cámara. Revisa los permisos en Safari.");
+                }
+              }
+
+              function apagar() {
+                if (scanner) {
+                  scanner.stop().then(() => scanner.clear()).catch(() => {});
+                  scanner = null;
+                }
+                activa = false;
+                const btn = document.getElementById("btn");
+                btn.textContent = "▶ Activar Cámara";
+                btn.style.color = "#58A6FF";
+              }
+
+              function mostrar(tipo, msg) {
+                const d = document.getElementById("msg");
+                d.className = tipo;
+                d.textContent = msg;
+                d.style.display = "block";
+              }
+              </script>
+            </body>
+            </html>
+            """
+
+            # st.components.v1.html no puede enviar valores a Python directamente.
+            # Usamos un text_input oculto como "buzón": el usuario no lo ve
+            # pero cuando el JS manda el postMessage, el componente Streamlit
+            # lo captura y recarga la página mostrando el resultado.
+            codigo_recibido = st.components.v1.html(
+                scanner_html, height=460
+            )
+
+            # Alternativa de entrada manual debajo del escáner
+            st.divider()
+            st.markdown(
+                "<p style='font-size:.8rem;color:#7D8590'>"
+                "¿El escáner ya lo leyó pero no aparece el detalle? "
+                "Copia el ID del mensaje verde y escríbelo aquí:</p>",
+                unsafe_allow_html=True
+            )
+            col1, col2 = st.columns([3, 1])
+            sid_cam = col1.text_input(
+                "ID leído por la cámara",
+                placeholder="SVC-20250321-0001",
+                key="input_cam"
+            )
+            if col2.button("Ver detalle", use_container_width=True, key="btn_cam"):
+                if sid_cam.strip():
+                    st.session_state.codigo_escaneado = sid_cam.strip()
+                    st.rerun()
 
     # ── TAB 2: Subir foto ──────────────────────────────────────────
     with tab2:
