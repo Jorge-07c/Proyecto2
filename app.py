@@ -599,11 +599,17 @@ def pg_buscar():
               config,
               (texto) => {
                 // ¡Código detectado!
-                mostrarOk("✅ Código leído: " + texto);
+                // Limpiar el texto: quitar espacios y caracteres raros
+                const limpio = texto.trim();
+                mostrarOk("✅ Código leído: " + limpio);
                 apagar();
-                // Pasar el código a Streamlit recargando con ?scanned=...
+                // Pasar el código a Streamlit.
+                // Usamos btoa para evitar que los caracteres especiales
+                // se corrompan en la URL (el problema del SVC#"-2...)
+                const encoded = btoa(unescape(encodeURIComponent(limpio)));
                 const url = new URL(window.parent.location.href);
-                url.searchParams.set("scanned", texto);
+                url.searchParams.set("scanned", encoded);
+                url.searchParams.set("b64", "1");
                 window.parent.location.href = url.toString();
               },
               (error) => { /* errores de frame son normales, ignorar */ }
@@ -648,9 +654,20 @@ def pg_buscar():
         # Recibir código escaneado vía query params
         params = st.query_params
         if "scanned" in params:
-            codigo_cam = params["scanned"]
+            raw = params["scanned"]
+            # Si viene en base64 (b64=1), decodificar
+            if params.get("b64") == "1":
+                try:
+                    import base64 as _b64
+                    codigo_cam = _b64.b64decode(raw).decode("utf-8").strip()
+                except Exception:
+                    codigo_cam = raw.strip()
+            else:
+                import html as _html
+                codigo_cam = _html.unescape(raw).strip()
+
             st.success(f"✅ Código escaneado: **{codigo_cam}**")
-            svc = buscar_por_id(codigo_cam.strip())
+            svc = buscar_por_id(codigo_cam)
             if svc:
                 _mostrar_servicio(svc)
             else:
